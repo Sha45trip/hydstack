@@ -1,6 +1,5 @@
-"""Spatial holdout — the test of whether alpha is transferable, which the
-brief calls out as the main structural risk (see "Validation" in
-FLOOD_EMULATOR_BRIEF.md).
+"""Spatial holdout — the test of whether alpha is transferable, the main
+structural risk in this method.
 
 Fit an alpha-to-catchment-attribute regression on a training fraction of
 catchments, predict alpha for the held-out ones, and reconstruct their RP100

@@ -3,8 +3,7 @@
 Runs calibrate.py's h100 / reconstruction / QC / volume cross-check across a
 whole basin and reports a basin-wide pass/fail against the CSI gate, on top of
 the per-reach flags calibrate.py already produces. Do not proceed to
-national-scale calibration if this fails — see FLOOD_EMULATOR_BRIEF.md's
-"Build order".
+national-scale calibration if this fails.
 """
 from __future__ import annotations
 

@@ -10,9 +10,6 @@ differencing that against HAND (height above nearest drainage). Depth
 generation for any scenario is then a raster subtraction: seconds for a
 district, minutes for India.
 
-See [`FLOOD_EMULATOR_BRIEF.md`](FLOOD_EMULATOR_BRIEF.md) for the full method,
-including why naive per-pixel rainfall scaling was rejected, the reconstruction
-QC gate, and known limitations. This README is setup and usage.
 
 ## Method, in one pass
 
