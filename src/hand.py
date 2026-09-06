@@ -60,6 +60,12 @@ def read_raster(path):
 def write_raster(path, array, profile, dtype=None, nodata=None):
     profile = profile.copy()
     dtype = dtype or array.dtype
+    # A source profile's own blockxsize/blockysize (e.g. from a WhiteboxTools
+    # output) isn't guaranteed to divide this array's dimensions -- GDAL then
+    # refuses to write ("BLOCKXSIZE must be a multiple of 16"). Let it pick a
+    # compatible block size instead of inheriting one that may not fit.
+    profile.pop("blockxsize", None)
+    profile.pop("blockysize", None)
     profile.update(dtype=dtype, count=1, compress="deflate", tiled=True)
     if nodata is not None:
         profile["nodata"] = nodata
