@@ -203,22 +203,24 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("hand_raster")
-    parser.add_argument("reach_id_raster")
+    parser.add_argument("catchment_id_raster",
+                         help="dense per-cell reach/catchment assignment (hand.py's catchment_id.tif) -- "
+                              "NOT reach_id.tif, which only labels the sparse stream-channel cells")
     parser.add_argument("d100_raster")
     parser.add_argument("curves_parquet")
     parser.add_argument("out_qc_csv")
     args = parser.parse_args()
 
     hand, profile = read_raster(args.hand_raster)
-    reach_id, _ = read_raster(args.reach_id_raster)
+    catchment_id, _ = read_raster(args.catchment_id_raster)
     d100, _ = read_raster(args.d100_raster)
     cell_area = abs(profile["transform"].a * profile["transform"].e)
     curves_df = pd.read_parquet(args.curves_parquet)
 
-    h100_df = compute_h100(hand, reach_id, d100)
-    d_recon = reconstruct_depth(hand, reach_id, h100_df)
-    qc_df = reconstruction_qc(d100, d_recon, reach_id, h100_df)
-    volume_check_df = cross_check_volume(curves_df, h100_df, d100, reach_id, cell_area)
+    h100_df = compute_h100(hand, catchment_id, d100)
+    d_recon = reconstruct_depth(hand, catchment_id, h100_df)
+    qc_df = reconstruction_qc(d100, d_recon, catchment_id, h100_df)
+    volume_check_df = cross_check_volume(curves_df, h100_df, d100, catchment_id, cell_area)
     qc_df = qc_df.merge(volume_check_df, on="reach_id", how="left")
 
     n_failed = int(qc_df["flag_low_csi"].sum())

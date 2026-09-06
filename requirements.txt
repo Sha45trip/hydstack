@@ -17,4 +17,5 @@ whitebox
 # optional: only used as an alternative HAND/flow-routing backend
 # pysheds
 
+matplotlib
 pytest

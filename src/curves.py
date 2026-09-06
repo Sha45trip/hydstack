@@ -152,7 +152,9 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("hand_raster")
-    parser.add_argument("reach_id_raster")
+    parser.add_argument("catchment_id_raster",
+                         help="dense per-cell reach/catchment assignment (hand.py's catchment_id.tif) -- "
+                              "NOT reach_id.tif, which only labels the sparse stream-channel cells")
     parser.add_argument("d100_raster", help="RP100 2030 anchor depth grid, used to size each reach's stage range")
     parser.add_argument("out_parquet")
     parser.add_argument("--n-steps", type=int, default=DEFAULT_N_STEPS)
@@ -160,14 +162,14 @@ def main():
     args = parser.parse_args()
 
     hand, profile = read_raster(args.hand_raster)
-    reach_id, _ = read_raster(args.reach_id_raster)
+    catchment_id, _ = read_raster(args.catchment_id_raster)
     d100, _ = read_raster(args.d100_raster)
 
     cell_area = abs(profile["transform"].a * profile["transform"].e)
-    anchor_stage = anchor_stage_by_reach(hand, reach_id, d100)
+    anchor_stage = anchor_stage_by_reach(hand, catchment_id, d100)
 
     curves_df = stage_volume_area_curves(
-        hand, reach_id, cell_area, anchor_stage=anchor_stage,
+        hand, catchment_id, cell_area, anchor_stage=anchor_stage,
         n_steps=args.n_steps, max_stage_multiple=args.max_stage_multiple,
     )
 
