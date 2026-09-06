@@ -18,4 +18,5 @@ whitebox
 # pysheds
 
 matplotlib
+contextily  # OSM-derived basemaps for scripts/plot_depth.py --basemap
 pytest

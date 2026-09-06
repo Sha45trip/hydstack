@@ -59,6 +59,60 @@ def render_fluvial_depth(hand, catchment_id, curves_df, alpha_by_catchment,
     return depth, extrapolated_mask
 
 
+def calibrate_channel_ratio(d100, catchment_id, rain_p100, exclude_mask=None):
+    """Per-catchment depth/rainfall ratio: k = median(d100 / rain_p100) over
+    wet, non-excluded cells.
+
+    This is a pragmatic stand-in for render_fluvial_depth's curve-based method
+    when that fails calibrate.py's reconstruction QC on real data — it is the
+    same naive d' = (d100/P100)*P' the brief's own "Why not just scale depth
+    by rainfall" section critiques, just calibrated per catchment instead of
+    one global ratio so nearby reaches with different terrain/rainfall don't
+    share a single number. It still inherits the naive method's structural
+    limitations: a frozen wet mask (extent can't expand beyond where d100 is
+    already wet) and a linear response (no sublinear d~P^0.3-0.6
+    floodplain-widening). Prefer render_fluvial_depth wherever it passes
+    reconstruction_qc; fall back to this only where it doesn't.
+
+    exclude_mask, if given, drops cells from calibration — e.g. cells already
+    covered by pluvial.py's depression model, so the same water isn't fit
+    twice under two different methods.
+
+    Returns a DataFrame: (catchment_id, k).
+    """
+    valid = (d100 > 0) & (rain_p100 > 0) & (catchment_id > 0)
+    if exclude_mask is not None:
+        valid = valid & ~exclude_mask
+
+    df = pd.DataFrame({
+        "catchment_id": catchment_id[valid],
+        "k": d100[valid] / rain_p100[valid],
+    })
+    return df.groupby("catchment_id")["k"].median().reset_index()
+
+
+def render_channel_ratio_depth(d100, catchment_id, rain_p_prime, k_df):
+    """d' = k * P'_local, per catchment, restricted to the frozen wet mask
+    (d100 > 0) — see calibrate_channel_ratio's docstring for the method's
+    known limitations.
+
+    Cells with no catchment or no calibrated k are NaN (unknown), not 0.
+    Originally-dry cells (d100 <= 0) are 0 — this method never predicts new
+    flooding beyond the anchor's wet footprint — not NaN.
+    """
+    k_by_catchment = k_df.set_index("catchment_id")["k"]
+    k_grid = broadcast_reach_values(catchment_id, k_by_catchment)
+    depth = k_grid * rain_p_prime
+    return np.where(d100 > 0, depth, 0.0)
+
+
+def combine_channel_and_depression_depth(channel_depth, depression_depth, depression_id):
+    """Union render_channel_ratio_depth's output with pluvial.render_pluvial_depth's:
+    depression cells take the (better-calibrated) depression model's value,
+    everything else takes the channel-ratio value."""
+    return np.where(depression_id > 0, depression_depth, channel_depth)
+
+
 def render_depth(hand, catchment_id, flow_acc, curves_df, alpha_by_catchment,
                   p_prime_mean_by_catchment, catchment_area_by_id,
                   dem=None, depression_id=None, depression_curves_df=None,

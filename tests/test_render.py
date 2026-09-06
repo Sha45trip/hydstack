@@ -1,10 +1,17 @@
 import numpy as np
+import pandas as pd
 import pytest
 
 from src.curves import stage_volume_area_curves
 from src.pluvial import depression_curves
 from src.regime import REGIME_FLUVIAL, REGIME_PLUVIAL
-from src.render import render_depth, render_fluvial_depth
+from src.render import (
+    calibrate_channel_ratio,
+    combine_channel_and_depression_depth,
+    render_channel_ratio_depth,
+    render_depth,
+    render_fluvial_depth,
+)
 
 
 def test_render_fluvial_depth_reproduces_curve_at_calibration_point():
@@ -142,3 +149,92 @@ def test_render_depth_attaches_low_confidence_flag_when_requested():
     assert "low_confidence" in result
     assert result["low_confidence"][0, 0]
     assert not result["low_confidence"][1, 1]
+
+
+def test_calibrate_channel_ratio_recovers_exact_ratio():
+    d100 = np.array([[2.0, 2.0], [0.0, 2.0]])
+    catchment_id = np.array([[1, 1], [1, 1]])
+    rain_p100 = np.full((2, 2), 10.0)
+
+    k_df = calibrate_channel_ratio(d100, catchment_id, rain_p100)
+
+    assert len(k_df) == 1
+    assert k_df.iloc[0]["catchment_id"] == 1
+    assert k_df.iloc[0]["k"] == pytest.approx(0.2)
+
+
+def test_calibrate_channel_ratio_uses_median_not_mean():
+    # ratios 0.1, 0.2, 0.3, 10.0 -- mean is dragged way up by the outlier,
+    # median (0.25) is robust to it, matching curves.py's median-based h100.
+    d100 = np.array([[1.0, 2.0, 3.0, 100.0]])
+    catchment_id = np.ones((1, 4), dtype=int)
+    rain_p100 = np.full((1, 4), 10.0)
+
+    k_df = calibrate_channel_ratio(d100, catchment_id, rain_p100)
+
+    assert k_df.iloc[0]["k"] == pytest.approx(0.25)
+
+
+def test_calibrate_channel_ratio_separates_catchments():
+    d100 = np.array([[2.0, 6.0]])
+    catchment_id = np.array([[1, 2]])
+    rain_p100 = np.full((1, 2), 10.0)
+
+    k_df = calibrate_channel_ratio(d100, catchment_id, rain_p100).set_index("catchment_id")["k"]
+
+    assert k_df.loc[1] == pytest.approx(0.2)
+    assert k_df.loc[2] == pytest.approx(0.6)
+
+
+def test_calibrate_channel_ratio_exclude_mask_drops_cells():
+    d100 = np.array([[2.0, 20.0]])  # second cell is a depression outlier
+    catchment_id = np.array([[1, 1]])
+    rain_p100 = np.full((1, 2), 10.0)
+    exclude_mask = np.array([[False, True]])
+
+    k_df = calibrate_channel_ratio(d100, catchment_id, rain_p100, exclude_mask=exclude_mask)
+
+    assert k_df.iloc[0]["k"] == pytest.approx(0.2)  # only the non-excluded cell counted
+
+
+def test_render_channel_ratio_depth_scales_by_rainfall_ratio():
+    d100 = np.array([[2.0, 2.0]])
+    catchment_id = np.array([[1, 1]])
+    k_df = pd.DataFrame({"catchment_id": [1], "k": [0.2]})
+    rain_p_prime = np.full((1, 2), 50.0)  # 5x the P100 that produced k=0.2 at d100=2.0/10.0
+
+    depth = render_channel_ratio_depth(d100, catchment_id, rain_p_prime, k_df)
+
+    np.testing.assert_allclose(depth, [[10.0, 10.0]])
+
+
+def test_render_channel_ratio_depth_frozen_mask_zeros_dry_cells():
+    d100 = np.array([[2.0, 0.0]])
+    catchment_id = np.array([[1, 1]])
+    k_df = pd.DataFrame({"catchment_id": [1], "k": [0.2]})
+    rain_p_prime = np.full((1, 2), 50.0)
+
+    depth = render_channel_ratio_depth(d100, catchment_id, rain_p_prime, k_df)
+
+    assert depth[0, 1] == 0.0  # originally dry -> stays dry, not NaN
+
+
+def test_render_channel_ratio_depth_unknown_catchment_is_nan_not_zero():
+    d100 = np.array([[2.0]])
+    catchment_id = np.array([[2]])  # no k calibrated for catchment 2
+    k_df = pd.DataFrame({"catchment_id": [1], "k": [0.2]})
+    rain_p_prime = np.full((1, 1), 50.0)
+
+    depth = render_channel_ratio_depth(d100, catchment_id, rain_p_prime, k_df)
+
+    assert np.isnan(depth[0, 0])
+
+
+def test_combine_channel_and_depression_depth_picks_by_domain():
+    channel_depth = np.array([[1.0, 1.0], [1.0, 1.0]])
+    depression_depth = np.array([[9.0, 9.0], [9.0, 9.0]])
+    depression_id = np.array([[0, 1], [0, 1]])
+
+    combined = combine_channel_and_depression_depth(channel_depth, depression_depth, depression_id)
+
+    np.testing.assert_array_equal(combined, [[1.0, 9.0], [1.0, 9.0]])
