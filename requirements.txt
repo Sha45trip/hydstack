@@ -1,0 +1,20 @@
+numpy
+pandas
+scipy
+pyarrow
+rasterio
+rioxarray
+xarray
+geopandas
+shapely
+exactextract
+dask[array]
+
+# DEM conditioning / flow routing / HAND — lazy-imported, only needed to run src/hand.py
+# and the depression delineation in src/pluvial.py against real rasters.
+whitebox
+
+# optional: only used as an alternative HAND/flow-routing backend
+# pysheds
+
+pytest

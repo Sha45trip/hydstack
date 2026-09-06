@@ -1,0 +1,9 @@
+[project]
+name = "hydstack"
+version = "0.1.0"
+description = "HAND-based flood depth emulator for India — any return period, year, or SSP from a single HEC-RAS anchor run."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
