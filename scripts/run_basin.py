@@ -14,6 +14,14 @@ This exists because steps 3-8 were, until now, ad-hoc glue run by hand for
 the Godavari sub-basin — see that session's history for the reasoning behind
 each default below. Nothing here is more "correct" than what's in src/; this
 just wires the existing library functions together for a new basin.
+
+Output layout under --out-dir:
+  raw/            extracted DEM, anchor depth, rainfall (Step 1)
+  intermediate/   HAND/reach/catchment delineations, unfiltered depressions
+  outputs/        depth_<scenario>_<year>.tif + .png, and the fitted
+                   calibration tables (channel_ratio_k, depression_alpha,
+                   depression_curves) -- everything worth looking at without
+                   re-running the pipeline lives here, nowhere else.
 """
 from __future__ import annotations
 
@@ -83,15 +91,20 @@ def run_basin(bbox, out_dir, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_
               depth_id=ANCHOR_DEPTH_ID, anchor_rainfall_id=ANCHOR_RAINFALL_ID, anchor_year=ANCHOR_YEAR,
               scenario_rainfall_id=None, scenario_year=None, skip_viz=False):
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir = out_dir / "raw"
+    intermediate_dir = out_dir / "intermediate"
+    outputs_dir = out_dir / "outputs"
+    for d in (raw_dir, intermediate_dir, outputs_dir):
+        d.mkdir(parents=True, exist_ok=True)
+
     scenario_rainfall_id = scenario_rainfall_id or anchor_rainfall_id
     scenario_year = scenario_year or anchor_year
 
     print("== 1/8: extract DEM, anchor depth, rainfall ==")
-    dem_path = out_dir / "dem.tif"
-    d100_path = out_dir / "d100.tif"
-    anchor_rain_path = out_dir / f"{anchor_rainfall_id}_{anchor_year}.tif"
-    scenario_rain_path = out_dir / f"{scenario_rainfall_id}_{scenario_year}.tif"
+    dem_path = raw_dir / "dem.tif"
+    d100_path = raw_dir / "d100.tif"
+    anchor_rain_path = raw_dir / f"{anchor_rainfall_id}_{anchor_year}.tif"
+    scenario_rain_path = raw_dir / f"{scenario_rainfall_id}_{scenario_year}.tif"
 
     _skip_if_exists(dem_path, extract_dem, bbox, dem_path)
     _skip_if_exists(d100_path, extract_depth, bbox, d100_path, id_value=depth_id)
@@ -101,7 +114,7 @@ def run_basin(bbox, out_dir, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_
                      id_value=scenario_rainfall_id, year=scenario_year)
 
     print("== 2/8: HAND / reach / catchment delineation ==")
-    hand_out = out_dir / "hand_out"
+    hand_out = intermediate_dir / "hand_out"
     if not (hand_out / "hand.tif").exists():
         build_hand_stack(dem_path, hand_out, threshold=threshold)
     else:
@@ -117,7 +130,7 @@ def run_basin(bbox, out_dir, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_
     rain_p_prime = _align_to(scenario_rain_path, hand_profile)
 
     print("== 4/8: depression delineation ==")
-    depression_id_raw_path = out_dir / "depression_id_raw.tif"
+    depression_id_raw_path = intermediate_dir / "depression_id_raw.tif"
     if not depression_id_raw_path.exists():
         delineate_depressions(dem_path, depression_id_raw_path)
     else:
@@ -135,6 +148,7 @@ def run_basin(bbox, out_dir, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_
     hd = depression_relative_elevation(dem, depression_id)
     anchor_stage = anchor_stage_by_reach(hd, depression_id, d100)
     depression_curves_df = depression_curves(dem, depression_id, cell_area, anchor_stage=anchor_stage)
+    depression_curves_df.to_parquet(outputs_dir / "depression_curves.parquet", index=False)
 
     dep_valid = depression_id > 0
     dep_ids, dep_counts = np.unique(depression_id[dep_valid], return_counts=True)
@@ -149,10 +163,12 @@ def run_basin(bbox, out_dir, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_
     p_prime_mean_by_depression = dep_df.groupby("depression_id")["p_prime"].mean().to_dict()
 
     alpha_df = calibrate_depression_alpha(d100, depression_id, cell_area, p100_mean_by_depression, footprint_area_by_id)
+    alpha_df.to_parquet(outputs_dir / "depression_alpha.parquet", index=False)
     alpha_by_depression = alpha_df.set_index("catchment_id")["alpha"].to_dict()
 
     print("== 6/8: channel-ratio calibration (excluding depression cells) ==")
     k_df = calibrate_channel_ratio(d100, catchment_id, rain_p100, exclude_mask=dep_valid)
+    k_df.to_parquet(outputs_dir / "channel_ratio_k.parquet", index=False)
 
     print("== 7/8: render + combine ==")
     channel_depth = render_channel_ratio_depth(d100, catchment_id, rain_p_prime, k_df)
@@ -162,7 +178,7 @@ def run_basin(bbox, out_dir, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_
     )
     combined = combine_channel_and_depression_depth(channel_depth, depression_depth, depression_id)
 
-    out_depth_path = out_dir / f"combined_{scenario_rainfall_id}_{scenario_year}.tif"
+    out_depth_path = outputs_dir / f"depth_{scenario_rainfall_id}_{scenario_year}.tif"
     write_raster(out_depth_path, combined.astype("float32"), hand_profile, dtype="float32", nodata=np.nan)
     print(f"  wrote {out_depth_path}")
 
@@ -170,13 +186,13 @@ def run_basin(bbox, out_dir, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_
         return out_depth_path
 
     print("== 8/8: coarse catchment boundary + PNG ==")
-    viz_hand_out = out_dir / "hand_out_viz"
+    viz_hand_out = intermediate_dir / "hand_out_viz"
     if not (viz_hand_out / "catchment_id.tif").exists():
         build_hand_stack(dem_path, viz_hand_out, threshold=viz_threshold)
     else:
         print(f"  skip {viz_hand_out} (already exists)")
 
-    out_png = out_dir / f"combined_{scenario_rainfall_id}_{scenario_year}.png"
+    out_png = outputs_dir / f"depth_{scenario_rainfall_id}_{scenario_year}.png"
     plot_depth_png(
         out_depth_path, out_png, title=f"{scenario_rainfall_id} {scenario_year} depth",
         basemap=True, boundary_raster=viz_hand_out / "catchment_id.tif",
