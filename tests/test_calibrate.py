@@ -1,3 +1,5 @@
+import time
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -122,3 +124,34 @@ def test_write_calibration_joins_alpha_and_qc_on_shared_id(tmp_path):
     assert out_path.exists()
     assert {"catchment_id", "alpha", "h100"}.issubset(calibration_df.columns)
     assert calibration_df.iloc[0]["catchment_id"] == 1
+
+
+def test_reconstruction_and_calibration_scale_to_many_reaches():
+    """Regression test: reconstruction_qc, cross_check_volume, and
+    calibrate_alpha used to mask the whole grid once per reach/catchment in a
+    loop -- O(n_reaches * n_cells) -- which was unusable on a real basin's
+    tens of thousands of reaches. Should stay roughly linear in grid size."""
+    rng = np.random.default_rng(1)
+    n_reaches = 3000
+    cells_per_reach = 50
+    hand = rng.uniform(0, 2, size=n_reaches * cells_per_reach)
+    reach_id = np.repeat(np.arange(1, n_reaches + 1), cells_per_reach)
+    h100_true = rng.uniform(0.5, 1.5, size=n_reaches)
+    d100 = np.clip(np.repeat(h100_true, cells_per_reach) - hand, 0, None)
+    cell_area = 900.0
+
+    start = time.perf_counter()
+    h100_df = compute_h100(hand, reach_id, d100)
+    d_recon = reconstruct_depth(hand, reach_id, h100_df)
+    qc_df = reconstruction_qc(d100, d_recon, reach_id, h100_df)
+    curves_df = stage_volume_area_curves(hand, reach_id, cell_area, n_steps=20)
+    volume_check_df = cross_check_volume(curves_df, h100_df, d100, reach_id, cell_area)
+    p100_mean = {rid: 0.05 for rid in range(1, n_reaches + 1)}
+    catchment_area = {rid: cells_per_reach * cell_area for rid in range(1, n_reaches + 1)}
+    alpha_df = calibrate_alpha(d100, reach_id, cell_area, p100_mean, catchment_area)
+    elapsed = time.perf_counter() - start
+
+    assert len(qc_df) == n_reaches
+    assert len(volume_check_df) == n_reaches
+    assert len(alpha_df) == n_reaches
+    assert elapsed < 20.0, f"took {elapsed:.1f}s for {n_reaches} reaches -- looks quadratic again"

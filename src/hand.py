@@ -25,8 +25,31 @@ def _wbt(working_dir: Path):
 
     wbt = WhiteboxTools()
     wbt.set_verbose_mode(False)
-    wbt.set_working_dir(str(working_dir))
+    wbt.set_working_dir(str(Path(working_dir).resolve()))
     return wbt
+
+
+def _abs(path):
+    """WhiteboxTools resolves relative input/output paths against --wd, not
+    the calling process's cwd — always pass it absolute paths."""
+    return str(Path(path).resolve())
+
+
+def _run_wbt(tool_fn, output_path, **kwargs):
+    """Call a WhiteboxTools tool and verify it actually produced output.
+
+    The Python wrapper can return 0 even when the underlying exe panics (e.g.
+    on a bad path) — the only reliable failure signal is the output file's
+    existence.
+    """
+    tool_fn(**kwargs)
+    output_path = Path(output_path)
+    if not output_path.exists():
+        raise RuntimeError(
+            f"WhiteboxTools call {tool_fn.__name__!r} did not produce {output_path} "
+            "(check stdout above, or call wbt.set_verbose_mode(True) for details)"
+        )
+    return output_path
 
 
 def read_raster(path):
@@ -49,37 +72,39 @@ def condition_dem(dem_path, out_path, max_dist=DEFAULT_BREACH_MAX_DIST_CELLS):
     """Breach depressions rather than fill, so flow paths survive embankments with culverts."""
     out_path = Path(out_path)
     wbt = _wbt(out_path.parent)
-    wbt.breach_depressions_least_cost(
-        dem=str(dem_path), output=str(out_path), dist=max_dist, fill=True,
-    )
+    _run_wbt(wbt.breach_depressions_least_cost, out_path,
+              dem=_abs(dem_path), output=_abs(out_path), dist=max_dist, fill=True)
     return out_path
 
 
 def flow_direction(conditioned_dem_path, out_path):
     out_path = Path(out_path)
     wbt = _wbt(out_path.parent)
-    wbt.d8_pointer(dem=str(conditioned_dem_path), output=str(out_path))
+    _run_wbt(wbt.d8_pointer, out_path, dem=_abs(conditioned_dem_path), output=_abs(out_path))
     return out_path
 
 
 def flow_accumulation(conditioned_dem_path, out_path):
     out_path = Path(out_path)
     wbt = _wbt(out_path.parent)
-    wbt.d8_flow_accumulation(i=str(conditioned_dem_path), output=str(out_path), out_type="cells")
+    _run_wbt(wbt.d8_flow_accumulation, out_path,
+              i=_abs(conditioned_dem_path), output=_abs(out_path), out_type="cells")
     return out_path
 
 
 def extract_streams(flow_accum_path, out_path, threshold=DEFAULT_FLOW_ACC_THRESHOLD_CELLS):
     out_path = Path(out_path)
     wbt = _wbt(out_path.parent)
-    wbt.extract_streams(flow_accum=str(flow_accum_path), output=str(out_path), threshold=threshold)
+    _run_wbt(wbt.extract_streams, out_path,
+              flow_accum=_abs(flow_accum_path), output=_abs(out_path), threshold=threshold)
     return out_path
 
 
 def compute_hand(conditioned_dem_path, streams_path, out_path):
     out_path = Path(out_path)
     wbt = _wbt(out_path.parent)
-    wbt.elevation_above_stream(dem=str(conditioned_dem_path), streams=str(streams_path), output=str(out_path))
+    _run_wbt(wbt.elevation_above_stream, out_path,
+              dem=_abs(conditioned_dem_path), streams=_abs(streams_path), output=_abs(out_path))
     return out_path
 
 
@@ -87,7 +112,8 @@ def assign_reach_ids(streams_path, pointer_path, out_path):
     """Unique ID per stream link — this becomes reach_id before any HEC-RAS snapping."""
     out_path = Path(out_path)
     wbt = _wbt(out_path.parent)
-    wbt.stream_link_identifier(d8_pntr=str(pointer_path), streams=str(streams_path), output=str(out_path))
+    _run_wbt(wbt.stream_link_identifier, out_path,
+              d8_pntr=_abs(pointer_path), streams=_abs(streams_path), output=_abs(out_path))
     return out_path
 
 
@@ -95,7 +121,8 @@ def assign_catchment_ids(pointer_path, reach_id_path, out_path):
     """Per-reach contributing catchment. Subbasin IDs match the link ID they drain to."""
     out_path = Path(out_path)
     wbt = _wbt(out_path.parent)
-    wbt.subbasins(d8_pntr=str(pointer_path), streams=str(reach_id_path), output=str(out_path))
+    _run_wbt(wbt.subbasins, out_path,
+              d8_pntr=_abs(pointer_path), streams=_abs(reach_id_path), output=_abs(out_path))
     return out_path
 
 

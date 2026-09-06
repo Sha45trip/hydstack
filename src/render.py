@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from src.calibrate import broadcast_reach_values
-from src.curves import invert_stage
+from src.curves import index_curves, invert_stage_indexed
 from src.pluvial import depression_relative_elevation, render_pluvial_depth
 from src.regime import REGIME_FLUVIAL, REGIME_PLUVIAL, classify_regime, confidence_flag
 
@@ -31,6 +31,8 @@ def render_fluvial_depth(hand, catchment_id, curves_df, alpha_by_catchment,
     Returns (depth, extrapolated_mask). Cells whose catchment is missing any
     of alpha/rainfall/area are left as NaN depth (unknown), not 0 (no flood).
     """
+    indexed_curves = index_curves(curves_df)
+
     h_by_catchment = {}
     extrapolated_by_catchment = {}
     for cid in np.unique(catchment_id):
@@ -42,7 +44,7 @@ def render_fluvial_depth(hand, catchment_id, curves_df, alpha_by_catchment,
         if not (np.isfinite(alpha) and np.isfinite(p_mean) and np.isfinite(area)):
             continue
         v_prime = alpha * p_mean * area
-        h_prime, extrapolated = invert_stage(curves_df, cid, v_prime)
+        h_prime, extrapolated = invert_stage_indexed(indexed_curves, cid, v_prime)
         h_by_catchment[cid] = h_prime
         extrapolated_by_catchment[cid] = float(extrapolated)
 

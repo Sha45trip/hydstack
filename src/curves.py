@@ -41,13 +41,22 @@ def stage_volume_area_curves(hand, reach_id, cell_area, anchor_stage=None,
     (e.g. a reach with no wet anchor cells). Returns a long-format DataFrame:
     (reach_id, h, volume, area).
     """
-    reach_ids = np.unique(reach_id[reach_id > 0])
+    valid = (reach_id > 0) & np.isfinite(hand)
+    flat_reach = reach_id[valid]
+    flat_hand = hand[valid]
+
+    # Group by reach via a single sort, rather than re-scanning the whole grid
+    # once per reach (hand[reach_id == rid] in a loop) -- that's O(n_reaches *
+    # n_cells) and grinds to a halt with tens of thousands of reaches.
+    order = np.argsort(flat_reach, kind="stable")
+    sorted_reach, sorted_hand = flat_reach[order], flat_hand[order]
+    boundaries = np.flatnonzero(np.diff(sorted_reach)) + 1
+    starts = np.concatenate(([0], boundaries))
+    ends = np.concatenate((boundaries, [len(sorted_reach)]))
+
     records = []
-    for rid in reach_ids:
-        hand_r = hand[reach_id == rid]
-        hand_r = hand_r[np.isfinite(hand_r)]
-        if hand_r.size == 0:
-            continue
+    for rid, start, end in zip(sorted_reach[starts], starts, ends):
+        hand_r = sorted_hand[start:end]
 
         if anchor_stage is not None and rid in anchor_stage.index:
             h_max = float(anchor_stage.loc[rid]) * max_stage_multiple
@@ -55,11 +64,11 @@ def stage_volume_area_curves(hand, reach_id, cell_area, anchor_stage=None,
             h_max = float(np.nanmax(hand_r))
         h_max = max(h_max, 1e-6)
 
-        sorted_hand = np.sort(hand_r)
-        cumsum = np.cumsum(sorted_hand)
+        hand_r_sorted = np.sort(hand_r)
+        cumsum = np.cumsum(hand_r_sorted)
         stages = np.linspace(0.0, h_max, n_steps)
         for h in stages:
-            idx = int(np.searchsorted(sorted_hand, h, side="left"))
+            idx = int(np.searchsorted(hand_r_sorted, h, side="left"))
             area = idx * cell_area
             below_sum = cumsum[idx - 1] if idx > 0 else 0.0
             volume = (h * idx - below_sum) * cell_area
@@ -94,6 +103,42 @@ def invert_stage(curves_df, reach_id_value, target_volume):
     extrapolated = bool(target_volume < v[0] or target_volume > v[-1])
     h_interp = float(np.interp(target_volume, v, h))
     return h_interp, extrapolated
+
+
+def index_curves(curves_df):
+    """Group the curve table by reach once, for repeated O(log k) lookups
+    (k = points per reach) instead of re-filtering the whole table on every
+    call — curves_df[curves_df["reach_id"] == rid] inside a per-reach loop is
+    O(n_reaches * n_rows) and is the dominant cost once a basin has tens of
+    thousands of reaches. Use this ahead of a loop calling invert_stage or
+    volume_at_stage many times; a single lookup can still use those directly.
+
+    Returns {reach_id: (h_sorted, v_sorted)}.
+    """
+    return {
+        rid: (group["h"].to_numpy(), group["volume"].to_numpy())
+        for rid, group in curves_df.sort_values("h").groupby("reach_id")
+    }
+
+
+def invert_stage_indexed(indexed_curves, reach_id_value, target_volume):
+    """Same as invert_stage, against an index built once by index_curves."""
+    entry = indexed_curves.get(reach_id_value)
+    if entry is None:
+        raise KeyError(f"no curve stored for reach_id={reach_id_value}")
+    h, v = entry
+    extrapolated = bool(target_volume < v[0] or target_volume > v[-1])
+    return float(np.interp(target_volume, v, h)), extrapolated
+
+
+def volume_at_stage_indexed(indexed_curves, reach_id_value, h_value):
+    """Forward lookup — V(h) for one reach — against an index built once by
+    index_curves."""
+    entry = indexed_curves.get(reach_id_value)
+    if entry is None:
+        return np.nan
+    h, v = entry
+    return float(np.interp(h_value, h, v))
 
 
 def write_curves(curves_df, out_path):

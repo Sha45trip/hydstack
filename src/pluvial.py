@@ -19,23 +19,14 @@ import numpy as np
 import pandas as pd
 
 from src.calibrate import broadcast_reach_values, calibrate_alpha
-from src.curves import invert_stage, stage_volume_area_curves
-from src.hand import flow_direction, read_raster, write_raster
-
-
-def _wbt(working_dir: Path):
-    from whitebox import WhiteboxTools
-
-    wbt = WhiteboxTools()
-    wbt.set_verbose_mode(False)
-    wbt.set_working_dir(str(working_dir))
-    return wbt
+from src.curves import index_curves, invert_stage_indexed, stage_volume_area_curves
+from src.hand import _abs, _run_wbt, _wbt, flow_direction, read_raster, write_raster
 
 
 def fill_dem(dem_path, out_path):
     out_path = Path(out_path)
     wbt = _wbt(out_path.parent)
-    wbt.fill_depressions(dem=str(dem_path), output=str(out_path))
+    _run_wbt(wbt.fill_depressions, out_path, dem=_abs(dem_path), output=_abs(out_path))
     return out_path
 
 
@@ -44,7 +35,7 @@ def delineate_depressions(dem_path, out_path):
     the pluvial domain, distinct from the reach-based fluvial one."""
     out_path = Path(out_path)
     wbt = _wbt(out_path.parent)
-    wbt.sink(dem=str(dem_path), output=str(out_path), zero_background=True)
+    _run_wbt(wbt.sink, out_path, dem=_abs(dem_path), output=_abs(out_path), zero_background=True)
     return out_path
 
 
@@ -74,7 +65,8 @@ def depression_contributing_area(dem_path, depression_id_path, out_dir):
 
     catchment_path = out_dir / "depression_catchment_id.tif"
     wbt = _wbt(out_dir)
-    wbt.watershed(d8_pntr=str(pointer_path), pour_pts=str(pour_path), output=str(catchment_path))
+    _run_wbt(wbt.watershed, catchment_path,
+              d8_pntr=_abs(pointer_path), pour_pts=_abs(pour_path), output=_abs(catchment_path))
     return catchment_path
 
 
@@ -117,6 +109,8 @@ def render_pluvial_depth(hd, depression_id, curves_df, alpha_by_depression,
 
     Returns (depth, extrapolated_mask).
     """
+    indexed_curves = index_curves(curves_df)
+
     h_by_depression = {}
     extrapolated_by_depression = {}
     for did in np.unique(depression_id):
@@ -128,7 +122,7 @@ def render_pluvial_depth(hd, depression_id, curves_df, alpha_by_depression,
         if not (np.isfinite(alpha) and np.isfinite(p_mean) and np.isfinite(area)):
             continue
         v_prime = alpha * p_mean * area
-        h_prime, extrapolated = invert_stage(curves_df, did, v_prime)
+        h_prime, extrapolated = invert_stage_indexed(indexed_curves, did, v_prime)
         h_by_depression[did] = h_prime
         extrapolated_by_depression[did] = float(extrapolated)
 

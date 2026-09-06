@@ -11,13 +11,31 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.curves import anchor_stage_by_reach
+from src.curves import anchor_stage_by_reach, index_curves, volume_at_stage_indexed
 
 CSI_THRESHOLDS = (0.15, 0.30, 0.50, 1.0)
 CSI_GATE_THRESHOLD_M = 0.30
 CSI_GATE_MIN = 0.80
 ALPHA_EXPECTED_RANGE = (0.05, 0.4)
 VOLUME_CROSS_CHECK_TOL = 0.05
+
+
+def _group_by_id(id_array):
+    """Sort cells by id once; returns (ids, starts, ends, valid_mask, order) so
+    callers can slice any co-located value array via
+    value_array[valid_mask][order][start:end] without re-scanning the whole
+    grid once per id (id_array == some_id in a loop is O(n_ids * n_cells) and
+    is the dominant cost once a basin has tens of thousands of reaches or
+    catchments).
+    """
+    valid = id_array > 0
+    flat_ids = id_array[valid]
+    order = np.argsort(flat_ids, kind="stable")
+    sorted_ids = flat_ids[order]
+    boundaries = np.flatnonzero(np.diff(sorted_ids)) + 1
+    starts = np.concatenate(([0], boundaries))
+    ends = np.concatenate((boundaries, [len(sorted_ids)]))
+    return sorted_ids[starts], starts, ends, valid, order
 
 
 def broadcast_reach_values(reach_id, values_by_reach):
@@ -71,11 +89,17 @@ def reconstruction_qc(d100, d_recon, reach_id, h100_df, thresholds=CSI_THRESHOLD
     """Per-reach CSI at each threshold, RMSE over union-wet cells, and
     inundated area ratio. Merges in h100/stage_iqr from compute_h100 and flags
     reaches failing the CSI gate."""
+    valid_ids = set(h100_df["reach_id"].tolist())
+    ids, starts, ends, valid, order = _group_by_id(reach_id)
+    flat_obs = d100[valid][order]
+    flat_recon = d_recon[valid][order]
+
     records = []
-    for rid in h100_df["reach_id"]:
-        mask = reach_id == rid
-        obs = d100[mask]
-        recon = d_recon[mask]
+    for rid, start, end in zip(ids, starts, ends):
+        if rid not in valid_ids:
+            continue
+        obs = flat_obs[start:end]
+        recon = flat_recon[start:end]
 
         row = {"reach_id": rid}
         for t in thresholds:
@@ -108,13 +132,20 @@ def cross_check_volume(curves_df, h100_df, d100, reach_id, cell_area, tol=VOLUME
     """V(h100) from the Step 2 curve should agree with sum(d100)*cell_area within
     a few percent. Large disagreement means HAND conditioning or reach
     assignment is wrong, not a calibration problem."""
+    ids, starts, ends, valid, order = _group_by_id(reach_id)
+    flat_d100 = d100[valid][order]
+    v_direct_by_id = {}
+    for rid, start, end in zip(ids, starts, ends):
+        v_direct_by_id[rid] = float(np.sum(flat_d100[start:end])) * cell_area
+
+    indexed_curves = index_curves(curves_df)
+
     records = []
     for _, row in h100_df.iterrows():
         rid, h100 = row["reach_id"], row["h100"]
-        mask = reach_id == rid
-        v_direct = float(np.sum(d100[mask])) * cell_area
-        v_curve = volume_at_stage(curves_df, rid, h100)
-        rel_diff = abs(v_curve - v_direct) / v_direct if v_direct > 0 else np.nan
+        v_direct = v_direct_by_id.get(rid, np.nan)
+        v_curve = volume_at_stage_indexed(indexed_curves, rid, h100)
+        rel_diff = abs(v_curve - v_direct) / v_direct if v_direct and v_direct > 0 else np.nan
         records.append({
             "reach_id": rid, "v_direct": v_direct, "v_curve": v_curve,
             "rel_diff": rel_diff, "flag_volume_mismatch": bool(rel_diff is not np.nan and rel_diff > tol),
@@ -134,11 +165,12 @@ def calibrate_alpha(d100, catchment_id, cell_area, p100_mean_by_catchment, catch
     disaggregation — all held fixed. Values outside [0.05, 0.4] need
     investigation, not clamping, so they're flagged rather than corrected.
     """
-    catchments = np.unique(catchment_id[catchment_id > 0])
+    ids, starts, ends, valid, order = _group_by_id(catchment_id)
+    flat_d100 = d100[valid][order]
+
     records = []
-    for cid in catchments:
-        mask = catchment_id == cid
-        v_obs = float(np.sum(d100[mask])) * cell_area
+    for cid, start, end in zip(ids, starts, ends):
+        v_obs = float(np.sum(flat_d100[start:end])) * cell_area
         p100_mean = p100_mean_by_catchment.get(cid, np.nan)
         area = catchment_area_by_id.get(cid, np.nan)
         v_rain = p100_mean * area if np.isfinite(p100_mean) and np.isfinite(area) else np.nan
