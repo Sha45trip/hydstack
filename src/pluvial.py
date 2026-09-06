@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from src.calibrate import broadcast_reach_values, calibrate_alpha
-from src.curves import index_curves, invert_stage_indexed, stage_volume_area_curves
+from src.curves import anchor_stage_by_reach, index_curves, invert_stage_indexed, stage_volume_area_curves
 from src.hand import _abs, _run_wbt, _wbt, flow_direction, read_raster, write_raster
 
 
@@ -35,7 +35,7 @@ def delineate_depressions(dem_path, out_path):
     the pluvial domain, distinct from the reach-based fluvial one."""
     out_path = Path(out_path)
     wbt = _wbt(out_path.parent)
-    _run_wbt(wbt.sink, out_path, dem=_abs(dem_path), output=_abs(out_path), zero_background=True)
+    _run_wbt(wbt.sink, out_path, i=_abs(dem_path), output=_abs(out_path), zero_background=True)
     return out_path
 
 
@@ -80,12 +80,22 @@ def depression_relative_elevation(dem, depression_id):
     return dem - floor_grid
 
 
-def depression_curves(dem, depression_id, cell_area, n_steps=20, max_stage_multiple=1.5):
+def depression_curves(dem, depression_id, cell_area, anchor_stage=None, n_steps=20, max_stage_multiple=1.5):
     """Per-depression volume-elevation curve, using depression_relative_elevation
-    as the stage datum instead of HAND."""
+    as the stage datum instead of HAND.
+
+    Without anchor_stage, the range is sized off the depression's own raw-DEM
+    relief (max hd within it) — fine when the observed anchor stage is
+    plausible for that relief, but for a depression whose d100-implied stage
+    (from anchor_stage_by_reach) far exceeds its own local relief, the table
+    ends up sized far too small and volume lookups near h100 collapse toward
+    zero. Pass anchor_stage (from curves.anchor_stage_by_reach against this
+    same depression_id and hd) to size the range off the real target instead.
+    """
     hd = depression_relative_elevation(dem, depression_id)
     return stage_volume_area_curves(
-        hd, depression_id, cell_area, n_steps=n_steps, max_stage_multiple=max_stage_multiple,
+        hd, depression_id, cell_area, anchor_stage=anchor_stage,
+        n_steps=n_steps, max_stage_multiple=max_stage_multiple,
     )
 
 
@@ -145,6 +155,9 @@ def main():
     parser.add_argument("d100_raster", help="RP100 2030 anchor depth grid")
     parser.add_argument("out_dir")
     parser.add_argument("--n-steps", type=int, default=20)
+    parser.add_argument("--min-cells", type=int, default=100,
+                         help="drop depressions smaller than this (raw DEMs produce huge numbers of "
+                              "1-2 cell pits that are noise, not real ponding features)")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -153,9 +166,18 @@ def main():
     depression_id_path = delineate_depressions(args.dem, out_dir / "depression_id.tif")
     dem, profile = read_raster(args.dem)
     depression_id, _ = read_raster(depression_id_path)
+    d100, _ = read_raster(args.d100_raster)
     cell_area = abs(profile["transform"].a * profile["transform"].e)
 
-    curves_df = depression_curves(dem, depression_id, cell_area, n_steps=args.n_steps)
+    ids, counts = np.unique(depression_id[depression_id > 0], return_counts=True)
+    keep_ids = ids[counts >= args.min_cells]
+    depression_id = np.where(np.isin(depression_id, keep_ids), depression_id, 0).astype("int32")
+    print(f"kept {len(keep_ids)}/{len(ids)} depressions (>= {args.min_cells} cells)")
+
+    hd = depression_relative_elevation(dem, depression_id)
+    anchor_stage = anchor_stage_by_reach(hd, depression_id, d100)
+
+    curves_df = depression_curves(dem, depression_id, cell_area, anchor_stage=anchor_stage, n_steps=args.n_steps)
     curves_df.to_parquet(out_dir / "depression_curves.parquet", index=False)
     print(f"wrote curves for {curves_df['reach_id'].nunique()} depressions")
 
