@@ -28,6 +28,11 @@ Output layout under --out-dir:
                    calibration tables (channel_ratio_k, depression_alpha,
                    depression_curves) -- everything worth looking at without
                    re-running the pipeline lives here, nowhere else.
+                   With --compare, also depth_naive_<scenario>_<year>.tif +
+                   .png: the pure per-pixel naive method
+                   (render.render_naive_ratio_depth), saved purely as a
+                   comparison baseline against the real (depth_*) output —
+                   never the method actually used for the deliverable.
 """
 from __future__ import annotations
 
@@ -60,6 +65,7 @@ from src.render import (
     calibrate_channel_ratio,
     combine_channel_and_depression_depth,
     render_channel_ratio_depth,
+    render_naive_ratio_depth,
 )
 
 DEFAULT_THRESHOLD = 5000  # flow-accumulation threshold for HAND/calibration reaches
@@ -106,7 +112,7 @@ def _polygon_inside_mask(basin_gdf, profile):
 def run_basin(bbox=None, shapefile=None, out_dir=None, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_VIZ_THRESHOLD,
               min_depression_cells=DEFAULT_MIN_DEPRESSION_CELLS,
               depth_id=ANCHOR_DEPTH_ID, anchor_rainfall_id=ANCHOR_RAINFALL_ID, anchor_year=ANCHOR_YEAR,
-              scenario_rainfall_id=None, scenario_year=None, skip_viz=False):
+              scenario_rainfall_id=None, scenario_year=None, skip_viz=False, compare=False):
     if out_dir is None:
         raise ValueError("out_dir is required")
 
@@ -221,6 +227,15 @@ def run_basin(bbox=None, shapefile=None, out_dir=None, threshold=DEFAULT_THRESHO
     write_raster(out_depth_path, combined.astype("float32"), hand_profile, dtype="float32", nodata=np.nan)
     print(f"  wrote {out_depth_path}")
 
+    naive_depth_path = None
+    if compare:
+        naive = render_naive_ratio_depth(d100, rain_p100, rain_p_prime)
+        if basin_gdf is not None:
+            naive = np.where(inside, naive, np.nan)
+        naive_depth_path = outputs_dir / f"depth_naive_{scenario_rainfall_id}_{scenario_year}.tif"
+        write_raster(naive_depth_path, naive.astype("float32"), hand_profile, dtype="float32", nodata=np.nan)
+        print(f"  wrote {naive_depth_path} (--compare baseline: pure per-pixel d'=(d100/P100)*P', see render.render_naive_ratio_depth)")
+
     if skip_viz:
         return out_depth_path
 
@@ -230,6 +245,14 @@ def run_basin(bbox=None, shapefile=None, out_dir=None, threshold=DEFAULT_THRESHO
         build_hand_stack(dem_path, viz_hand_out, threshold=viz_threshold)
     else:
         print(f"  skip {viz_hand_out} (already exists)")
+
+    if naive_depth_path is not None:
+        naive_png = outputs_dir / f"depth_naive_{scenario_rainfall_id}_{scenario_year}.png"
+        plot_depth_png(
+            naive_depth_path, naive_png, title=f"{scenario_rainfall_id} {scenario_year} depth (naive baseline)",
+            basemap=True, boundary_raster=viz_hand_out / "catchment_id.tif",
+        )
+        print(f"  wrote {naive_png}")
 
     out_png = outputs_dir / f"depth_{scenario_rainfall_id}_{scenario_year}.png"
     plot_depth_png(
@@ -266,6 +289,9 @@ def main():
                               "Defaults to the anchor (a reproduction sanity check, not a real scenario).")
     parser.add_argument("--scenario-year", type=int, default=None)
     parser.add_argument("--skip-viz", action="store_true", help="skip the coarse boundary layer and PNG")
+    parser.add_argument("--compare", action="store_true",
+                         help="also save the pure per-pixel naive-method depth (depth_naive_*.tif/.png) "
+                              "as a comparison baseline -- see render.render_naive_ratio_depth")
     args = parser.parse_args()
 
     run_basin(
@@ -274,7 +300,7 @@ def main():
         min_depression_cells=args.min_depression_cells, depth_id=args.depth_id,
         anchor_rainfall_id=args.anchor_rainfall_id, anchor_year=args.anchor_year,
         scenario_rainfall_id=args.scenario_rainfall_id, scenario_year=args.scenario_year,
-        skip_viz=args.skip_viz,
+        skip_viz=args.skip_viz, compare=args.compare,
     )
 
 

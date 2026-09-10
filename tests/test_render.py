@@ -11,6 +11,7 @@ from src.render import (
     render_channel_ratio_depth,
     render_depth,
     render_fluvial_depth,
+    render_naive_ratio_depth,
 )
 
 
@@ -238,3 +239,45 @@ def test_combine_channel_and_depression_depth_picks_by_domain():
     combined = combine_channel_and_depression_depth(channel_depth, depression_depth, depression_id)
 
     np.testing.assert_array_equal(combined, [[1.0, 9.0], [1.0, 9.0]])
+
+
+def test_render_naive_ratio_depth_scales_by_rainfall_ratio():
+    d100 = np.array([[2.0, 2.0]])
+    rain_p100 = np.full((1, 2), 10.0)
+    rain_p_prime = np.full((1, 2), 50.0)  # 5x P100
+
+    depth = render_naive_ratio_depth(d100, rain_p100, rain_p_prime)
+
+    np.testing.assert_allclose(depth, [[10.0, 10.0]])
+
+
+def test_render_naive_ratio_depth_is_per_pixel_not_per_catchment():
+    # two pixels with different local ratios -- unlike calibrate_channel_ratio,
+    # the naive method must NOT pool them into one shared value.
+    d100 = np.array([[2.0, 6.0]])
+    rain_p100 = np.full((1, 2), 10.0)
+    rain_p_prime = np.full((1, 2), 10.0)
+
+    depth = render_naive_ratio_depth(d100, rain_p100, rain_p_prime)
+
+    np.testing.assert_allclose(depth, [[2.0, 6.0]])
+
+
+def test_render_naive_ratio_depth_frozen_mask_zeros_dry_cells():
+    d100 = np.array([[2.0, 0.0]])
+    rain_p100 = np.full((1, 2), 10.0)
+    rain_p_prime = np.full((1, 2), 50.0)
+
+    depth = render_naive_ratio_depth(d100, rain_p100, rain_p_prime)
+
+    assert depth[0, 1] == 0.0
+
+
+def test_render_naive_ratio_depth_unknown_when_no_rain_is_nan_not_zero():
+    d100 = np.array([[2.0]])
+    rain_p100 = np.array([[0.0]])  # no anchor rainfall -> no ratio can be formed
+    rain_p_prime = np.array([[50.0]])
+
+    depth = render_naive_ratio_depth(d100, rain_p100, rain_p_prime)
+
+    assert np.isnan(depth[0, 0])

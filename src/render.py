@@ -106,6 +106,27 @@ def render_channel_ratio_depth(d100, catchment_id, rain_p_prime, k_df):
     return np.where(d100 > 0, depth, 0.0)
 
 
+def render_naive_ratio_depth(d100, rain_p100, rain_p_prime):
+    """The pure per-pixel naive method: d' = (d100/P100) * P', with no
+    reach/catchment grouping at all — exactly what the brief's "Why not just
+    scale depth by rainfall" section critiques, and the un-calibrated
+    counterpart to calibrate_channel_ratio/render_channel_ratio_depth (same
+    formula, fit per catchment instead of per pixel).
+
+    This exists purely as a comparison baseline — see run_basin.py's
+    --compare flag — never as the method actually used to produce a
+    deliverable depth grid.
+
+    Same frozen-mask convention as render_channel_ratio_depth: originally-dry
+    cells (d100 <= 0) are 0; wet cells where rain_p100 <= 0 (no ratio can be
+    formed) are NaN.
+    """
+    with np.errstate(divide="ignore", invalid="ignore"):
+        k = np.where(rain_p100 > 0, d100 / rain_p100, np.nan)
+    depth = k * rain_p_prime
+    return np.where(d100 > 0, depth, 0.0)
+
+
 def combine_channel_and_depression_depth(channel_depth, depression_depth, depression_id):
     """Union render_channel_ratio_depth's output with pluvial.render_pluvial_depth's:
     depression cells take the (better-calibrated) depression model's value,
