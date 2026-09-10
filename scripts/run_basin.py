@@ -5,8 +5,14 @@
   3. Align d100 and rainfall onto the HAND grid
   4. Depression delineation, filtered to real features (src/pluvial.py)
   5. Depression curves + alpha calibration (src/pluvial.py)
-  6. Channel-ratio calibration for everything outside depressions (src/render.py)
-  7. Render the scenario and combine both domains
+  6. Fluvial (channel) stage-volume curves, reconstruction QC, and alpha
+     calibration for everything outside depressions (src/curves.py,
+     src/calibrate.py)
+  7. Render both domains via curve inversion (d' = max(0, h'-HAND), so wet
+     extent genuinely grows with the scenario, not just depth magnitude —
+     see src/render.py's render_fluvial_depth) and combine; write a
+     low-confidence flag (failed QC, rainfall far from the anchor, or the
+     stage clamped at the tabulated range)
   8. (optional) a separate, much coarser catchment layer for a legible
      boundary overlay, and a PNG (scripts/plot_depth.py)
 
@@ -14,6 +20,13 @@ This exists because steps 3-8 were, until now, ad-hoc glue run by hand for
 the Godavari sub-basin — see that session's history for the reasoning behind
 each default below. Nothing here is more "correct" than what's in src/; this
 just wires the existing library functions together for a new basin.
+
+The fluvial reconstruction QC gate is reported (fluvial_reconstruction_qc.csv)
+but NOT enforced as a hard stop — catchments that fail it still render, just
+flagged low-confidence, because the QC-passing sparse-reach-only version of
+this method was found to be a near-degenerate test (HAND~=0 on stream cells
+by construction) rather than real validation; the honest picture is a
+confidence flag per cell, not a pass/fail gate on the whole basin.
 
 Pass either --bbox or --shapefile (a basin boundary polygon, any CRS
 geopandas can read). Extraction always uses a bounding box regardless — GCS
@@ -24,8 +37,10 @@ watershed shape rather than left as an arbitrary rectangle.
 Output layout under --out-dir:
   raw/            extracted DEM, anchor depth, rainfall (Step 1)
   intermediate/   HAND/reach/catchment delineations, unfiltered depressions
-  outputs/        depth_<scenario>_<year>.tif + .png, and the fitted
-                   calibration tables (channel_ratio_k, depression_alpha,
+  outputs/        depth_<scenario>_<year>.tif + .png -- the deliverable --
+                   plus low_confidence_<scenario>_<year>.tif and the fitted
+                   calibration tables (fluvial_curves, fluvial_alpha,
+                   fluvial_reconstruction_qc, depression_alpha,
                    depression_curves) -- everything worth looking at without
                    re-running the pipeline lives here, nowhere else.
                    With --compare, also depth_naive_<scenario>_<year>.tif +
@@ -52,7 +67,14 @@ from scripts.extract_basin import (
     extract_rainfall_band,
 )
 from scripts.plot_depth import plot_depth_png
-from src.curves import anchor_stage_by_reach
+from src.calibrate import (
+    broadcast_reach_values,
+    calibrate_alpha,
+    compute_h100,
+    reconstruct_depth,
+    reconstruction_qc,
+)
+from src.curves import anchor_stage_by_reach, stage_volume_area_curves
 from src.hand import build_hand_stack, read_raster, write_raster
 from src.pluvial import (
     calibrate_depression_alpha,
@@ -62,15 +84,15 @@ from src.pluvial import (
     render_pluvial_depth,
 )
 from src.render import (
-    calibrate_channel_ratio,
     combine_channel_and_depression_depth,
-    render_channel_ratio_depth,
+    render_fluvial_depth,
     render_naive_ratio_depth,
 )
 
 DEFAULT_THRESHOLD = 5000  # flow-accumulation threshold for HAND/calibration reaches
 DEFAULT_VIZ_THRESHOLD = 300000  # much coarser -- for a legible boundary overlay only
 DEFAULT_MIN_DEPRESSION_CELLS = 100  # raw DEMs produce ~1M+ 1-2 cell noise pits
+DEFAULT_LOG_RATIO_LOW_CONFIDENCE = np.log(2.0)  # |log(P'/P100)| beyond this -> low confidence
 
 
 def _align_to(src_path, target_profile, resampling=Resampling.bilinear):
@@ -206,17 +228,65 @@ def run_basin(bbox=None, shapefile=None, out_dir=None, threshold=DEFAULT_THRESHO
     alpha_df.to_parquet(outputs_dir / "depression_alpha.parquet", index=False)
     alpha_by_depression = alpha_df.set_index("catchment_id")["alpha"].to_dict()
 
-    print("== 6/8: channel-ratio calibration (excluding depression cells) ==")
-    k_df = calibrate_channel_ratio(d100, catchment_id, rain_p100, exclude_mask=dep_valid)
-    k_df.to_parquet(outputs_dir / "channel_ratio_k.parquet", index=False)
+    print("== 6/8: fluvial (channel) stage-volume curves + alpha ==")
+    anchor_stage_channel = anchor_stage_by_reach(hand, catchment_id, d100)
+    fluvial_curves_df = stage_volume_area_curves(hand, catchment_id, cell_area, anchor_stage=anchor_stage_channel)
+    fluvial_curves_df.to_parquet(outputs_dir / "fluvial_curves.parquet", index=False)
+
+    h100_df = compute_h100(hand, catchment_id, d100)
+    d_recon = reconstruct_depth(hand, catchment_id, h100_df)
+    qc_df = reconstruction_qc(d100, d_recon, catchment_id, h100_df)
+    qc_df.to_csv(outputs_dir / "fluvial_reconstruction_qc.csv", index=False)
+    n_pass = int((~qc_df["flag_low_csi"]).sum())
+    print(f"  reconstruction QC: {n_pass}/{len(qc_df)} catchments pass the CSI gate "
+          f"({100 * n_pass / max(len(qc_df), 1):.1f}%) -- failing ones are flagged low-confidence, not excluded")
+
+    catch_valid = catchment_id > 0
+    catch_ids, catch_counts = np.unique(catchment_id[catch_valid], return_counts=True)
+    catchment_area_by_id = dict(zip(catch_ids.tolist(), (catch_counts * cell_area).tolist()))
+
+    catch_df = pd.DataFrame({
+        "catchment_id": catchment_id[catch_valid],
+        "p100": rain_p100[catch_valid],
+        "p_prime": rain_p_prime[catch_valid],
+    })
+    p100_mean_by_catchment = catch_df.groupby("catchment_id")["p100"].mean().to_dict()
+    p_prime_mean_by_catchment = catch_df.groupby("catchment_id")["p_prime"].mean().to_dict()
+
+    fluvial_alpha_df = calibrate_alpha(d100, catchment_id, cell_area, p100_mean_by_catchment, catchment_area_by_id)
+    fluvial_alpha_df.to_parquet(outputs_dir / "fluvial_alpha.parquet", index=False)
+    alpha_by_catchment = fluvial_alpha_df.set_index("catchment_id")["alpha"].to_dict()
 
     print("== 7/8: render + combine ==")
-    channel_depth = render_channel_ratio_depth(d100, catchment_id, rain_p_prime, k_df)
-    depression_depth, _ = render_pluvial_depth(
+    channel_depth, channel_extrapolated = render_fluvial_depth(
+        hand, catchment_id, fluvial_curves_df, alpha_by_catchment,
+        p_prime_mean_by_catchment, catchment_area_by_id,
+    )
+    depression_depth, depression_extrapolated = render_pluvial_depth(
         hd, depression_id, depression_curves_df, alpha_by_depression,
         p_prime_mean_by_depression, footprint_area_by_id,
     )
     combined = combine_channel_and_depression_depth(channel_depth, depression_depth, depression_id)
+    extrapolated = combine_channel_and_depression_depth(
+        channel_extrapolated.astype(float), depression_extrapolated.astype(float), depression_id,
+    ) > 0.5
+
+    # low confidence: this catchment failed the reconstruction QC gate, the
+    # scenario rainfall departs far from the anchor, or the render clamped at
+    # the tabulated stage range (extrapolated) -- see brief's "Known limitations"
+    low_csi_by_catchment = qc_df.set_index("reach_id")["flag_low_csi"].astype(float)
+    low_csi_grid = broadcast_reach_values(catchment_id, low_csi_by_catchment)
+    low_csi_mask = np.nan_to_num(low_csi_grid, nan=0.0) > 0.5
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_ratio = np.log(np.where(rain_p100 > 0, rain_p_prime / rain_p100, np.nan))
+    rainfall_departure = np.abs(log_ratio) > DEFAULT_LOG_RATIO_LOW_CONFIDENCE  # NaN comparisons are False
+
+    low_confidence = low_csi_mask | rainfall_departure | extrapolated
+    write_raster(outputs_dir / f"low_confidence_{scenario_rainfall_id}_{scenario_year}.tif",
+                 low_confidence.astype("uint8"), hand_profile, dtype="uint8", nodata=255)
+    print(f"  low-confidence cells: {int(low_confidence.sum())}/{low_confidence.size} "
+          f"({100 * low_confidence.mean():.1f}%) -- see low_confidence_*.tif")
 
     if basin_gdf is not None:
         inside = _polygon_inside_mask(basin_gdf, hand_profile)
