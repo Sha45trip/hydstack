@@ -309,6 +309,22 @@ def run_basin(bbox=None, shapefile=None, out_dir=None, threshold=DEFAULT_THRESHO
     if skip_viz:
         return out_depth_path
 
+    # Everything downstream either re-reads from disk (plot_depth_png) or runs
+    # in a separate WhiteboxTools subprocess (build_hand_stack) -- none of it
+    # needs these full-resolution in-memory arrays. Holding ~20 of them alive
+    # while spawning another whitebox run on the same DEM was OOM-ing on
+    # larger basins.
+    del (dem, hand, catchment_id, depression_id, depression_id_raw, d100, rain_p100, rain_p_prime,
+         hd, catch_valid, dep_valid, channel_depth, channel_extrapolated,
+         depression_depth, depression_extrapolated, combined, extrapolated,
+         low_csi_grid, low_csi_mask, log_ratio, rainfall_departure, low_confidence, d_recon)
+    if compare:
+        del naive
+    if basin_gdf is not None:
+        del inside
+    import gc
+    gc.collect()
+
     print("== 8/8: coarse catchment boundary + PNG ==")
     viz_hand_out = intermediate_dir / "hand_out_viz"
     if not (viz_hand_out / "catchment_id.tif").exists():

@@ -61,9 +61,15 @@ def plot_depth_png(raster_path, out_png, title=None, cmap="Blues", vmax_percenti
         with rasterio.open(boundary_raster) as src:
             ids = src.read(1)
         boundary = _boundary_mask(ids)
-        overlay = np.zeros((*boundary.shape, 4))
-        overlay[boundary] = (0.1, 0.1, 0.1, 0.6)
+        del ids
+        # uint8 RGBA, not the float64 imshow defaults to -- on a large basin
+        # (tens of millions of pixels) a float64 (H,W,4) overlay is the single
+        # biggest array in this function; uint8 cuts it 8x.
+        overlay = np.zeros((*boundary.shape, 4), dtype=np.uint8)
+        overlay[boundary] = (26, 26, 26, 153)  # (0.1, 0.1, 0.1, 0.6) as 0-255
+        del boundary
         ax.imshow(overlay, extent=(bounds.left, bounds.right, bounds.bottom, bounds.top))
+        del overlay
 
     if not basemap:
         ax.set_facecolor("#f2f2f0")
@@ -76,6 +82,13 @@ def plot_depth_png(raster_path, out_png, title=None, cmap="Blues", vmax_percenti
     fig.tight_layout()
     fig.savefig(out_png, dpi=dpi)
     plt.close(fig)
+
+    # run_basin.py calls this twice back-to-back (--compare); force the figure
+    # and its backing arrays to actually release before the next call starts,
+    # rather than relying on Python's lazy GC to catch up in time.
+    import gc
+    gc.collect()
+
     return out_png
 
 
