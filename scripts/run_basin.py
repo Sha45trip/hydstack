@@ -15,6 +15,12 @@ the Godavari sub-basin — see that session's history for the reasoning behind
 each default below. Nothing here is more "correct" than what's in src/; this
 just wires the existing library functions together for a new basin.
 
+Pass either --bbox or --shapefile (a basin boundary polygon, any CRS
+geopandas can read). Extraction always uses a bounding box regardless — GCS
+reads are windowed rectangles — but with --shapefile the box is the
+polygon's own bounds, and the final depth output is clipped to the true
+watershed shape rather than left as an arbitrary rectangle.
+
 Output layout under --out-dir:
   raw/            extracted DEM, anchor depth, rainfall (Step 1)
   intermediate/   HAND/reach/catchment delineations, unfiltered depressions
@@ -86,10 +92,38 @@ def _skip_if_exists(path, fn, *args, **kwargs):
     return fn(*args, **kwargs)
 
 
-def run_basin(bbox, out_dir, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_VIZ_THRESHOLD,
+def _polygon_inside_mask(basin_gdf, profile):
+    """Boolean grid, True where a cell falls inside the basin polygon(s)."""
+    from rasterio.features import geometry_mask
+
+    shapes = [geom for geom in basin_gdf.geometry if geom is not None]
+    return geometry_mask(
+        shapes, out_shape=(profile["height"], profile["width"]), transform=profile["transform"],
+        invert=True,  # geometry_mask defaults to True OUTSIDE the shapes; we want True inside
+    )
+
+
+def run_basin(bbox=None, shapefile=None, out_dir=None, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_VIZ_THRESHOLD,
               min_depression_cells=DEFAULT_MIN_DEPRESSION_CELLS,
               depth_id=ANCHOR_DEPTH_ID, anchor_rainfall_id=ANCHOR_RAINFALL_ID, anchor_year=ANCHOR_YEAR,
               scenario_rainfall_id=None, scenario_year=None, skip_viz=False):
+    if out_dir is None:
+        raise ValueError("out_dir is required")
+
+    basin_gdf = None
+    if shapefile is not None:
+        import geopandas as gpd
+
+        basin_gdf = gpd.read_file(shapefile)
+        if basin_gdf.crs is not None and basin_gdf.crs.to_epsg() != 4326:
+            basin_gdf = basin_gdf.to_crs(epsg=4326)
+        bbox = tuple(basin_gdf.total_bounds)
+        print(f"  basin polygon: {len(basin_gdf)} feature(s), bbox {bbox}")
+    elif bbox is None:
+        raise ValueError("must provide either bbox or shapefile")
+    else:
+        bbox = tuple(bbox)
+
     out_dir = Path(out_dir)
     raw_dir = out_dir / "raw"
     intermediate_dir = out_dir / "intermediate"
@@ -178,6 +212,11 @@ def run_basin(bbox, out_dir, threshold=DEFAULT_THRESHOLD, viz_threshold=DEFAULT_
     )
     combined = combine_channel_and_depression_depth(channel_depth, depression_depth, depression_id)
 
+    if basin_gdf is not None:
+        inside = _polygon_inside_mask(basin_gdf, hand_profile)
+        combined = np.where(inside, combined, np.nan)
+        print(f"  clipped to basin polygon: {inside.sum()}/{inside.size} cells inside ({100 * inside.mean():.1f}%)")
+
     out_depth_path = outputs_dir / f"depth_{scenario_rainfall_id}_{scenario_year}.tif"
     write_raster(out_depth_path, combined.astype("float32"), hand_profile, dtype="float32", nodata=np.nan)
     print(f"  wrote {out_depth_path}")
@@ -206,9 +245,13 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--bbox", nargs=4, type=float, required=True, metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--bbox", nargs=4, type=float, metavar=("XMIN", "YMIN", "XMAX", "YMAX"),
                          help="start with a ~2x2 degree window, not a full basin -- a full-basin DEM OOM'd "
                               "WhiteboxTools' depression breaching in this session")
+    source.add_argument("--shapefile", default=None,
+                         help="a basin boundary polygon (.shp or anything geopandas reads) -- extraction still "
+                              "uses its bounding box, but the final depth output is clipped to the true shape")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD,
                          help="flow-accumulation threshold for HAND/reach delineation (calibration granularity)")
@@ -226,7 +269,8 @@ def main():
     args = parser.parse_args()
 
     run_basin(
-        tuple(args.bbox), args.out_dir, threshold=args.threshold, viz_threshold=args.viz_threshold,
+        bbox=tuple(args.bbox) if args.bbox else None, shapefile=args.shapefile, out_dir=args.out_dir,
+        threshold=args.threshold, viz_threshold=args.viz_threshold,
         min_depression_cells=args.min_depression_cells, depth_id=args.depth_id,
         anchor_rainfall_id=args.anchor_rainfall_id, anchor_year=args.anchor_year,
         scenario_rainfall_id=args.scenario_rainfall_id, scenario_year=args.scenario_year,
